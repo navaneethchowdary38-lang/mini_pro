@@ -77,27 +77,34 @@ for chat_id, chat_data in st.session_state.chats.items():
         st.rerun()
 
 # ================= CHAT INPUT =================
-st.title("📘 SlideSense")
-
-chat_id = st.session_state.current_chat_id
-messages = st.session_state.chats[chat_id]["messages"]
-
 question = st.chat_input("Ask something...")
 
 if question:
-    # FAKE AI RESPONSE (replace with your LLM code)
-    answer = f"AI response to: {question}"
+    chat_id = st.session_state.current_chat_id
+    chat_data = st.session_state.chats[chat_id]
 
-    messages.append({"role": "user", "content": question})
-    messages.append({"role": "assistant", "content": answer})
+    # Add user message
+    chat_data["messages"].append({
+        "role": "user",
+        "content": question
+    })
 
-    # Auto title generation
-    if st.session_state.chats[chat_id]["title"] == "New Chat":
-        st.session_state.chats[chat_id]["title"] = question[:40]
+    # 🔥 AUTO TITLE GENERATION (ONLY IF FIRST MESSAGE)
+    if len(chat_data["messages"]) == 1:
+        chat_data["title"] = question[:35] + ("..." if len(question) > 35 else "")
 
+    # ---- Your AI Response ----
+    answer = f"AI response to: {question}"   # replace with real LLM
+
+    chat_data["messages"].append({
+        "role": "assistant",
+        "content": answer
+    })
+
+    # Save to Firebase AFTER updating title
     save_chat(chat_id)
-    st.rerun()
 
+    st.rerun()
 # ================= DISPLAY CHAT =================
 for msg in messages:
     with st.chat_message(msg["role"]):
