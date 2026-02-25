@@ -3,14 +3,14 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import uuid
 from datetime import datetime
-
 from PyPDF2 import PdfReader
+
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.prompts import ChatPromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 
 # ================= FIREBASE INIT =================
@@ -20,19 +20,19 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
-# ================= PAGE CONFIG =================
 st.set_page_config(page_title="SlideSense", page_icon="📘", layout="wide")
 
-# ================= SESSION DEFAULTS =================
-defaults = {
-    "user_id": "demo_user",  # Replace with real auth user id
-    "chats": {},
-    "current_chat_id": None,
-}
+# ================= SESSION STATE =================
+if "chats" not in st.session_state:
+    st.session_state.chats = {}
 
-for k, v in defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+if "current_chat_id" not in st.session_state:
+    st.session_state.current_chat_id = None
+
+if "vector_store" not in st.session_state:
+    st.session_state.vector_store = None
+
+USER_ID = "demo_user"   # Replace with your auth system
 
 
 # ================= LLM =================
@@ -41,53 +41,40 @@ def load_llm():
     return ChatGoogleGenerativeAI(model="gemini-2.5-flash")
 
 
-# ================= FIREBASE FUNCTIONS =================
-def load_user_chats():
-    user_ref = db.collection("users").document(st.session_state.user_id)
-    chats_ref = user_ref.collection("chats").stream()
-
+# ================= FIREBASE =================
+def load_chats():
     chats = {}
-    for chat in chats_ref:
-        chats[chat.id] = chat.to_dict()
-
-    st.session_state.chats = chats
+    docs = db.collection("users").document(USER_ID).collection("chats").stream()
+    for doc in docs:
+        chats[doc.id] = doc.to_dict()
+    return chats
 
 
 def save_chat(chat_id):
-    user_ref = db.collection("users").document(st.session_state.user_id)
-    user_ref.collection("chats").document(chat_id).set(
+    db.collection("users").document(USER_ID).collection("chats").document(chat_id).set(
         st.session_state.chats[chat_id]
     )
 
 
 def delete_chat(chat_id):
-    user_ref = db.collection("users").document(st.session_state.user_id)
-    user_ref.collection("chats").document(chat_id).delete()
-
+    db.collection("users").document(USER_ID).collection("chats").document(chat_id).delete()
     st.session_state.chats.pop(chat_id)
-
-    if st.session_state.chats:
-        st.session_state.current_chat_id = list(st.session_state.chats.keys())[0]
-    else:
-        create_new_chat()
 
 
 def create_new_chat():
     chat_id = str(uuid.uuid4())
     st.session_state.chats[chat_id] = {
         "title": "New Chat",
-        "created_at": datetime.utcnow(),
         "messages": [],
-        "pdf_id": None,
-        "vector_db": None
+        "pdf_id": None
     }
     st.session_state.current_chat_id = chat_id
     save_chat(chat_id)
 
 
-# ================= INITIAL LOAD =================
+# ================= LOAD INITIAL =================
 if not st.session_state.chats:
-    load_user_chats()
+    st.session_state.chats = load_chats()
 
 if not st.session_state.current_chat_id:
     if st.session_state.chats:
@@ -101,17 +88,20 @@ st.sidebar.title("💬 Chats")
 
 if st.sidebar.button("➕ New Chat"):
     create_new_chat()
+    st.session_state.vector_store = None
     st.rerun()
 
-for chat_id, chat_data in st.session_state.chats.items():
-    col1, col2 = st.sidebar.columns([4, 1])
+for chat_id, chat in st.session_state.chats.items():
+    col1, col2 = st.sidebar.columns([4,1])
 
-    if col1.button(chat_data["title"], key=f"select_{chat_id}"):
+    if col1.button(chat["title"], key=f"sel_{chat_id}"):
         st.session_state.current_chat_id = chat_id
+        st.session_state.vector_store = None   # reset vector store
         st.rerun()
 
-    if col2.button("🗑", key=f"delete_{chat_id}"):
+    if col2.button("🗑", key=f"del_{chat_id}"):
         delete_chat(chat_id)
+        st.session_state.vector_store = None
         st.rerun()
 
 
@@ -121,6 +111,7 @@ st.title("📘 SlideSense AI")
 chat_id = st.session_state.current_chat_id
 chat_data = st.session_state.chats[chat_id]
 
+
 # ================= PDF UPLOAD =================
 pdf = st.file_uploader("Upload PDF", type="pdf")
 
@@ -128,14 +119,14 @@ if pdf:
     pdf_id = f"{pdf.name}_{pdf.size}"
 
     if chat_data["pdf_id"] != pdf_id:
+
         with st.spinner("Processing PDF..."):
+
             reader = PdfReader(pdf)
             text = ""
-
             for page in reader.pages:
-                extracted = page.extract_text()
-                if extracted:
-                    text += extracted + "\n"
+                if page.extract_text():
+                    text += page.extract_text()
 
             splitter = RecursiveCharacterTextSplitter(
                 chunk_size=500,
@@ -148,33 +139,28 @@ if pdf:
                 model_name="sentence-transformers/all-MiniLM-L6-v2"
             )
 
-            chat_data["vector_db"] = FAISS.from_texts(chunks, embeddings)
+            st.session_state.vector_store = FAISS.from_texts(chunks, embeddings)
             chat_data["pdf_id"] = pdf_id
 
             save_chat(chat_id)
 
 
-# ================= CHAT INPUT =================
-question = st.chat_input("Ask about this PDF...")
+# ================= CHAT =================
+question = st.chat_input("Ask about this PDF")
 
 if question:
-    chat_data["messages"].append({
-        "role": "user",
-        "content": question
-    })
 
-    # 🔥 AUTO TITLE (ONLY FIRST MESSAGE)
+    chat_data["messages"].append({"role": "user", "content": question})
+
+    # ✅ TITLE FIX
     if len(chat_data["messages"]) == 1:
-        chat_data["title"] = question[:35] + (
-            "..." if len(question) > 35 else ""
-        )
+        chat_data["title"] = question[:30] + ("..." if len(question) > 30 else "")
 
-    if chat_data["vector_db"] is None:
+    if st.session_state.vector_store is None:
         answer = "Please upload a PDF first."
     else:
         llm = load_llm()
-
-        docs = chat_data["vector_db"].similarity_search(question, k=5)
+        docs = st.session_state.vector_store.similarity_search(question, k=5)
 
         prompt = ChatPromptTemplate.from_template("""
 Context:
@@ -188,19 +174,15 @@ Answer only from document.
 
         chain = create_stuff_documents_chain(llm, prompt)
         result = chain.invoke({"context": docs, "question": question})
-
         answer = result if isinstance(result, str) else result.get("output_text", "")
 
-    chat_data["messages"].append({
-        "role": "assistant",
-        "content": answer
-    })
+    chat_data["messages"].append({"role": "assistant", "content": answer})
 
     save_chat(chat_id)
     st.rerun()
 
 
-# ================= DISPLAY CHAT =================
+# ================= DISPLAY =================
 for msg in chat_data["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
