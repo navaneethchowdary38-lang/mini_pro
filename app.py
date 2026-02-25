@@ -21,7 +21,7 @@ db = firestore.client()
 
 st.set_page_config(page_title="SlideSense", page_icon="📘", layout="wide")
 
-USER_ID = "demo_user"   # replace with real auth id
+USER_ID = "demo_user"
 
 
 # ================= SESSION STATE =================
@@ -61,15 +61,38 @@ def delete_chat(chat_id):
     st.session_state.chats.pop(chat_id, None)
 
 
+def clear_chat(chat_id):
+    """Wipe messages and reset title, keep the chat entry alive."""
+    st.session_state.chats[chat_id]["messages"] = []
+    st.session_state.chats[chat_id]["title"] = None
+    st.session_state.chats[chat_id]["pdf_id"] = None
+    st.session_state.vector_store = None
+    save_chat(chat_id)
+
+
 def create_new_chat():
     chat_id = str(uuid.uuid4())
     st.session_state.chats[chat_id] = {
-        "title": None,  # 🔥 start empty
+        "title": None,
         "messages": [],
         "pdf_id": None
     }
     st.session_state.current_chat_id = chat_id
     st.session_state.vector_store = None
+
+
+# ================= AUTO NAMING VIA LLM =================
+def generate_chat_title(question: str) -> str:
+    """Ask the LLM to produce a short, descriptive chat title."""
+    llm = load_llm()
+    prompt = (
+        "Generate a concise chat title (max 5 words, no quotes) "
+        f"for a conversation that starts with this question: {question}"
+    )
+    response = llm.invoke(prompt)
+    # response is an AIMessage; extract text
+    title = response.content.strip().strip('"').strip("'")
+    return title[:40]  # hard cap just in case
 
 
 # ================= INITIAL LOAD =================
@@ -90,17 +113,24 @@ if st.sidebar.button("➕ New Chat"):
     create_new_chat()
     st.rerun()
 
-for cid, chat in st.session_state.chats.items():
-    col1, col2 = st.sidebar.columns([4, 1])
+for cid, chat in list(st.session_state.chats.items()):
+    col1, col2, col3 = st.sidebar.columns([4, 1, 1])
 
     title = chat["title"] if chat["title"] else "New Chat"
 
     if col1.button(title, key=f"select_{cid}"):
         st.session_state.current_chat_id = cid
-        st.session_state.vector_store = None   # reset vector when switching
+        st.session_state.vector_store = None
         st.rerun()
 
-    if col2.button("🗑", key=f"delete_{cid}"):
+    # 🧹 Clear button
+    if col2.button("🧹", key=f"clear_{cid}", help="Clear chat"):
+        clear_chat(cid)
+        st.session_state.current_chat_id = cid
+        st.rerun()
+
+    # 🗑 Delete button
+    if col3.button("🗑", key=f"delete_{cid}", help="Delete chat"):
         delete_chat(cid)
         st.session_state.vector_store = None
         if st.session_state.chats:
@@ -116,6 +146,12 @@ st.title("📘 SlideSense AI")
 chat_id = st.session_state.current_chat_id
 chat_data = st.session_state.chats[chat_id]
 
+# Clear button in main area too (handy)
+if chat_data["messages"]:
+    if st.button("🧹 Clear this chat", key="main_clear"):
+        clear_chat(chat_id)
+        st.rerun()
+
 
 # ================= PDF UPLOAD =================
 pdf = st.file_uploader("Upload PDF", type="pdf")
@@ -123,11 +159,8 @@ pdf = st.file_uploader("Upload PDF", type="pdf")
 if pdf:
     pdf_id = f"{pdf.name}_{pdf.size}"
 
-    # Only rebuild if new PDF for this chat
     if chat_data["pdf_id"] != pdf_id:
-
         with st.spinner("Processing PDF..."):
-
             reader = PdfReader(pdf)
             text = ""
             for page in reader.pages:
@@ -135,11 +168,7 @@ if pdf:
                 if extracted:
                     text += extracted
 
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=500,
-                chunk_overlap=80
-            )
-
+            splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=80)
             chunks = splitter.split_text(text)
 
             embeddings = HuggingFaceEmbeddings(
@@ -148,7 +177,6 @@ if pdf:
 
             st.session_state.vector_store = FAISS.from_texts(chunks, embeddings)
             chat_data["pdf_id"] = pdf_id
-
             save_chat(chat_id)
 
 
@@ -156,18 +184,12 @@ if pdf:
 question = st.chat_input("Ask about this PDF")
 
 if question:
+    chat_data["messages"].append({"role": "user", "content": question})
 
-    # Add user message
-    chat_data["messages"].append({
-        "role": "user",
-        "content": question
-    })
-
-    # 🔥 TITLE AUTO GENERATION (only first user message)
+    # 🔥 LLM-powered auto title on first message
     if chat_data["title"] is None:
-        chat_data["title"] = question[:30] + (
-            "..." if len(question) > 30 else ""
-        )
+        with st.spinner("Naming chat..."):
+            chat_data["title"] = generate_chat_title(question)
 
     # Generate answer
     if st.session_state.vector_store is None:
@@ -185,20 +207,12 @@ Question:
 
 Answer only from document.
 """)
-
         chain = create_stuff_documents_chain(llm, prompt)
         result = chain.invoke({"context": docs, "question": question})
         answer = result if isinstance(result, str) else result.get("output_text", "")
 
-    # Add assistant message
-    chat_data["messages"].append({
-        "role": "assistant",
-        "content": answer
-    })
-
-    # Save AFTER updating title + messages
+    chat_data["messages"].append({"role": "assistant", "content": answer})
     save_chat(chat_id)
-
     st.rerun()
 
 
