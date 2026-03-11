@@ -1,10 +1,10 @@
 import streamlit as st
 
 from config import load_llm
-from rag.pdf_processor import extract_text, split_text
-from rag.vector_store import build_vector_db
-from rag.qa_chain import ask_question
-from image.image_qa import ask_image_question
+from pdf_processor import extract_text, split_text
+from vector_store import load_or_create_vector_db
+from qa_chain import ask_question
+from image_qa import ask_image_question
 
 st.set_page_config(page_title="SlideSense AI")
 
